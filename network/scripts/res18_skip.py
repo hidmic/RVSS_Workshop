@@ -52,6 +52,30 @@ class Resnet18Skip(nn.Module):
         upsampled_map = nn.UpsamplingBilinear2d(scale_factor=2)(low_res_map)
         return upsampled_map + high_res_map
 
+    def forward(self, img):
+        # Create the code here to implement the architecture in Figure 1
+        
+        # Encoder -- define the connections between the layers in the encoder here
+        c1 = self.res18_backbone(img)
+        c2 = self.conv2_x(c1) # feature map spaticl dim 48 x 64
+        c3 = self.conv3_x(c2) # feature map spaticl dim 24 x 32
+        c4 = self.conv4_x(c3) # feature map spaticl dim 12 x 16
+        c5 = self.conv5_x(c4) # feature map spaticl dim 6 x 8
+        
+        # Decoder -- define the decoder layers and additions here.
+        p5 = self.top_conv(c5)
+        p5u = nn.UpsamplingBilinear2d(scale_factor=2)(p5)
+        p4 = p5u + self.lateral_conv1(c4)
+        p4u = nn.UpsamplingBilinear2d(scale_factor=2)(p4)
+        p3 = p4u + self.lateral_conv2(c3)
+        p3u = nn.UpsamplingBilinear2d(scale_factor=2)(p3)
+        p2 = p3u + self.lateral_conv3(c2)
+        
+        # Final layer
+        p2u = nn.UpsamplingBilinear2d(scale_factor=2)(p2)
+        out = self.segmentation_conv(p2u)
+        return out
+
     ###################################################################
     # def forward(self, img):
     #     # Encoder

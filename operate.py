@@ -22,6 +22,7 @@ sys.path.insert(0,"{}/network/scripts".format(os.getcwd()))
 
 from network.scripts.detector import Detector
 
+from machinevisiontoolbox import Image
 
 
 class Operate:
@@ -60,12 +61,13 @@ class Operate:
         self.start_time = time.time()
         self.control_clock = time.time()
         #
+        self.last_time = 0
+        self.fruit_estimations = {}
         self.detector_output = np.zeros([240,320], dtype=np.uint8)
         self.img = np.zeros([240,320,3], dtype=np.uint8)
         self.aruco_img = np.zeros([240,320,3], dtype=np.uint8)
         self.network_vis = cv2.imread('pics/rvss_8bit/detector_splash.png')
         self.bg = pygame.image.load('pics/gui_mask.jpg')
-
 
     def control(self):       
         if args.play_data:
@@ -98,16 +100,62 @@ class Operate:
             self.request_recover_robot = False
         elif self.ekf_on: # and not self.debug_flag:
             self.ekf.predict(drive_meas)
+            # for label, (_, _, pos, cov) in self.fruit_estimations.items():
+            #    if pos is None:
+            #        continue
+            #    lms.append(measure.Marker(pos, label + 100, cov))
             self.ekf.add_landmarks(lms)
             self.ekf.update(lms)
 
     def detect_fruit(self):
-        if self.command['inference'] and self.detector is not None:
-            self.detector_output, self.network_vis = self.detector.detect_single_image(self.img)
+        import time
+        now = time.time()
+        self.timeout = float('+inf')
+        if ((now - self.last_time) > self.timeout or self.command['inference']) and self.detector is not None:
+            self.detector_output, self.network_vis = \
+                self.detector.detect_single_image(self.img) 
+            iK = np.linalg.inv(self.ekf.robot.camera_matrix)
+            theta = self.ekf.robot.state[2].item()
+            R = np.array([
+                [np.cos(theta), -np.sin(theta)],
+                [np.sin(theta), np.cos(theta)]
+            ])
+            p = self.ekf.robot.state[:2]
+            Ep = self.ekf.P[:3, :3]
+            eigens, _ = np.linalg.eig(Ep)
+            sigma = max(0.5, np.max(eigens))
+            labels = np.unique(self.detector_output)
+            for label in labels[labels > 0]:
+                print(label)
+                mask = np.where(self.detector_output == label, 255, 0)
+                mask = cv2.resize(mask.astype('float32'), self.img.shape[:2])
+                mask = Image(mask.astype('uint8'))
+                blobs = mask.blobs()
+                if len(blobs) > 1:
+                    continue
+                blob = blobs[0]
+                u, v = blob.centroid
+                z = iK @ np.array([[u, v, 1]]).T
+                alpha = np.arcsin(-z[0]).item()
+                eta = R @ np.array([[np.cos(alpha)], [np.sin(alpha)]])
+                etat = np.array([-eta[1], eta[0]])
+                Ek = 1.0/np.sqrt(sigma) * etat @ etat.T
+                if label in self.fruit_estimations:
+                    A, b, _, _ = self.fruit_estimations[label]
+                    A = np.vstack((A, Ek))
+                    b = np.vstack((b, Ek @ p))
+                    position, *_ = np.linalg.lstsq(A, b, rcond=None)
+                    covariance = A.T @ A
+                    self.fruit_estimations[label] = \
+                        A, b, position, covariance
+                else:
+                    self.fruit_estimations[label] = \
+                        Ek, Ek @ p, None, None 
+            self.last_time = now
             self.command['inference'] = False
             self.file_output = (self.detector_output, self.ekf)
             self.notification = f'{len(np.unique(self.detector_output))-1} fruit type(s) detected'
-            
+
     def init_ekf(self, datadir, ip):
         fileK = "{}intrinsic.txt".format(datadir)
         camera_matrix = np.loadtxt(fileK, delimiter=',')
@@ -141,8 +189,14 @@ class Operate:
         text_colour = (220, 220, 220)
         v_pad = 40
         h_pad = 20
-        ekf_view = self.ekf.draw_slam_state(res=(320, 480+v_pad),
-            not_pause = self.ekf_on)
+        res = (320, 480+v_pad)
+
+        estimates = {
+            label: (pos, cov) for label, (_, _, pos, cov) 
+            in self.fruit_estimations.items() if pos is not None
+        }
+        ekf_view = self.ekf.draw_slam_state(estimates, 
+            res=res, not_pause = self.ekf_on)
         canvas.blit(ekf_view, (2*h_pad+320, v_pad))
 
         robot_view = cv2.resize(self.aruco_img, (320, 240))

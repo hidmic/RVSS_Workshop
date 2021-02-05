@@ -18,7 +18,7 @@ class EKF:
         self.robot = robot
         self.markers = np.zeros((2,0))
         self.taglist = []
-
+        self.mthreshold = 1.5
         # Covariance matrix
         self.P = np.zeros((3,3))
         self.init_lm_cov = 1e3
@@ -122,10 +122,12 @@ class EKF:
 
         y = z - z_hat
         S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        x = x + K @ y
-        self.P = (np.eye(x.shape[0]) - K @ H) @ self.P
+        Si = np.linalg.inv(S)
+        d = np.sqrt(y.T @ Si @ y)
+        if d.item() < self.mthreshold:
+            K = self.P @ H.T @ Si
+            x = x + K @ y
+            self.P = (np.eye(x.shape[0]) - K @ H) @ self.P
         self.set_state_vector(x)
 
 
@@ -138,7 +140,7 @@ class EKF:
     def predict_covariance(self, raw_drive_meas):
         n = self.number_landmarks()*2 + 3
         Q = np.zeros((n,n))
-        Q[0:3,0:3] = self.robot.covariance_drive(raw_drive_meas)+ 0.01*np.eye(3)
+        Q[0:3,0:3] = self.robot.covariance_drive(raw_drive_meas)+ 1e-3*np.eye(3)
         return Q
 
     def add_landmarks(self, measurements):
@@ -215,7 +217,7 @@ class EKF:
         y_im = int(y*m2pixel+h/2.0)
         return (x_im, y_im)
 
-    def draw_slam_state(self, res = (320, 500), not_pause=True):
+    def draw_slam_state(self, estimates = None, res = (320, 500), not_pause=True):
         # Draw landmarks
         m2pixel = 100
         if not_pause:
@@ -248,7 +250,14 @@ class EKF:
                 canvas = cv2.ellipse(canvas, coor_, 
                     (int(axes_len[0]*m2pixel), int(axes_len[1]*m2pixel)),
                     angle, 0, 360, (244, 69, 96), 1)
-
+        for pos, cov in estimates.values():
+            xy = (pos[0, 0], pos[1, 0])
+            coor_ = self.to_im_coor(xy, res, m2pixel)
+            axes_len, angle = self.make_ellipse(cov)
+            canvas = cv2.ellipse(canvas, coor_, 
+               (int(axes_len[0]*m2pixel), int(axes_len[1]*m2pixel)),
+               angle, 0, 360, (244, 69, 96), 1)
+ 
         surface = pygame.surfarray.make_surface(np.rot90(canvas))
         surface = pygame.transform.flip(surface, True, False)
         surface.blit(self.rot_center(self.pibot_pic, robot_theta*57.3),
@@ -263,6 +272,11 @@ class EKF:
                 except IndexError:
                     surface.blit(self.lm_pics[-1],
                     (coor_[0]-5, coor_[1]-5))
+        for pos, cov in estimates.values():
+            xy = (pos[0, 0], pos[1, 0])
+            coor_ = self.to_im_coor(xy, res, m2pixel)
+            surface.blit(self.lm_pics[-1], (coor_[0]-5, coor_[1]-5))
+ 
         return surface
 
     @staticmethod
